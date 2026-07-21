@@ -39,10 +39,14 @@ func createPatch(ctx context.Context, container *di.Container) error {
 	logger := container.Logger
 	cfg := container.Config
 
-	// 1. Determine old and new build directories
+	// 1. Locate old and new build directories
 	oldDir := filepath.Join(cfg.ProjectDir, ".revora", "cache", "previous")
 	newDir := filepath.Join(cfg.ProjectDir, "build")
 
+	logger.Info("Checking directories",
+		zap.String("old", oldDir),
+		zap.String("new", newDir),
+	)
 	if _, err := os.Stat(oldDir); os.IsNotExist(err) {
 		return fmt.Errorf("previous build not found at %s – run 'revora build' and then make a release first", oldDir)
 	}
@@ -50,31 +54,36 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		return fmt.Errorf("current build not found at %s – run 'revora build' first", newDir)
 	}
 
-	// 2. Generate patch using patch engine
+	// 2. Generate patch using the patch engine
 	patchFile := filepath.Join(cfg.ProjectDir, ".revora", "update.patch")
 	engine := cfg.PatchEngine
 	if engine == "" {
 		engine = "revora-patch"
 	}
 
-	logger.Info("Creating patch", zap.String("engine", engine))
+	logger.Info("Creating patch (engine will show progress)", zap.String("engine", engine))
 	cmd := exec.Command(engine, "create", "--old", oldDir, "--new", newDir, "--patch", patchFile)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = os.Stderr // engine prints per-file progress to stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("patch creation failed: %w", err)
 	}
 
-	// 3. Compute SHA-256 of patch file
+	// 3. Compute SHA-256 of the patch file
+	logger.Info("Computing patch hash...")
 	hash, err := sha256File(patchFile)
 	if err != nil {
 		return err
 	}
 	logger.Info("Patch hash", zap.String("sha256", hash))
 
-	// 4. Determine versions
+	// 4. Determine version numbers
 	lastVersion := getLastVersion(cfg.ProjectDir)
 	nextVersion := getNextVersion(cfg.ProjectDir)
+	logger.Info("Versioning",
+		zap.String("previous", lastVersion),
+		zap.String("next", nextVersion),
+	)
 
 	// 5. Create manifest
 	manifest := map[string]interface{}{
@@ -89,6 +98,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 	}
 
 	// 6. Sign manifest
+	logger.Info("Signing manifest...")
 	signature, err := signManifest(manifestBytes, cfg)
 	if err != nil {
 		return fmt.Errorf("sign manifest: %w", err)
@@ -104,7 +114,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		return err
 	}
 
-	// 8. Upload to GitHub (if a client is available)
+	// 8. Upload to GitHub
 	if container.GitHubClient == nil {
 		return fmt.Errorf("GitHub client not available – run revora login")
 	}
@@ -114,6 +124,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 	}
 
 	// Create a draft release
+	logger.Info("Creating draft release on GitHub...")
 	release, err := container.GitHubClient.CreateRelease(ctx, owner, repo, &github.RepositoryRelease{
 		TagName:    github.String(nextVersion),
 		Name:       github.String(nextVersion),
@@ -124,13 +135,22 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		return fmt.Errorf("create release: %w", err)
 	}
 
-	// Upload assets
+	// Upload assets with size logging
 	uploadFile := func(name string) error {
 		f, err := os.Open(name)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		logger.Info("Uploading",
+			zap.String("file", filepath.Base(name)),
+			zap.Int64("size_bytes", fi.Size()),
+		)
 		_, err = container.GitHubClient.UploadReleaseAsset(ctx, owner, repo, release.GetID(), &github.UploadOptions{
 			Name: filepath.Base(name),
 		}, f)

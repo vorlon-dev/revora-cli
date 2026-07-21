@@ -4,6 +4,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ func main() {
 	root.AddCommand(createCmd())
 	root.AddCommand(applyCmd())
 	if err := root.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -25,7 +27,7 @@ func createCmd() *cobra.Command {
 	var oldDir, newDir, patchFile string
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a binary patch",
+		Short: "Create a binary patch (diff between two directories)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if oldDir == "" || newDir == "" || patchFile == "" {
 				return fmt.Errorf("--old, --new, and --patch are required")
@@ -33,8 +35,8 @@ func createCmd() *cobra.Command {
 			return createPatch(oldDir, newDir, patchFile)
 		},
 	}
-	cmd.Flags().StringVar(&oldDir, "old", "", "old directory")
-	cmd.Flags().StringVar(&newDir, "new", "", "new directory")
+	cmd.Flags().StringVar(&oldDir, "old", "", "old directory (baseline)")
+	cmd.Flags().StringVar(&newDir, "new", "", "new directory (current)")
 	cmd.Flags().StringVar(&patchFile, "patch", "", "output patch file")
 	return cmd
 }
@@ -58,53 +60,91 @@ func applyCmd() *cobra.Command {
 }
 
 func createPatch(oldDir, newDir, patchFile string) error {
-	f, err := os.Create(patchFile)
+	out, err := os.Create(patchFile)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	gw := gzip.NewWriter(f)
+	defer out.Close()
+	gw := gzip.NewWriter(out)
 	defer gw.Close()
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
 	base := filepath.Clean(newDir)
+	var countAdded, countTotal int
+
 	err = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "walk error: %v\n", err)
 			return err
 		}
+		if info.IsDir() {
+			return nil
+		}
+
+		countTotal++
 		rel, err := filepath.Rel(base, path)
 		if err != nil {
 			return err
 		}
-		// Determine if the file is new or changed relative to oldDir
+
 		oldPath := filepath.Join(oldDir, rel)
-		oldInfo, _ := os.Stat(oldPath)
-		if info.IsDir() {
-			return nil
-		}
-		if oldInfo != nil && !oldInfo.ModTime().Before(info.ModTime()) {
-			// unchanged
-			return nil
-		}
-		// Add to tar
-		header, err := tar.FileInfoHeader(info, rel)
-		if err != nil {
+		changed, err := fileChanged(oldPath, path)
+		if err != nil || changed {
+			// file is new or changed – add to patch
+			countAdded++
+			fmt.Fprintf(os.Stderr, "[%d/%d] adding  %s\n", countAdded, countTotal, rel)
+
+			header, err := tar.FileInfoHeader(info, rel)
+			if err != nil {
+				return err
+			}
+			header.Name = rel
+			if err := tw.WriteHeader(header); err != nil {
+				return err
+			}
+			src, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			_, err = io.Copy(tw, src)
 			return err
 		}
-		header.Name = rel
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-		src, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
-		_, err = io.Copy(tw, src)
-		return err
+		fmt.Fprintf(os.Stderr, "[%d/%d] unchanged  %s\n", countAdded, countTotal, rel)
+		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Patch complete: %d files changed/new out of %d total.\n", countAdded, countTotal)
+	return nil
+}
+
+func fileChanged(oldPath, newPath string) (bool, error) {
+	oldHash, err := fileSHA256(oldPath)
+	if err != nil {
+		// old file doesn't exist or can't be read → treat as changed
+		return true, nil
+	}
+	newHash, err := fileSHA256(newPath)
+	if err != nil {
+		return false, err
+	}
+	return oldHash != newHash, nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func applyPatch(oldDir, newDir, patchFile string) error {
@@ -138,8 +178,8 @@ func applyPatch(oldDir, newDir, patchFile string) error {
 		if err != nil {
 			return err
 		}
-		defer outFile.Close()
 		_, err = io.Copy(outFile, tr)
+		outFile.Close()
 		if err != nil {
 			return err
 		}
