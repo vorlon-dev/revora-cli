@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/revora/revora/internal/crypto"
 	"github.com/revora/revora/internal/di"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -31,14 +32,19 @@ func newInitCmd() *cobra.Command {
 
 func initProject(cmd *cobra.Command, container *di.Container) error {
 	logger := container.Logger
-	cwd := container.Config.ProjectDir
 
+	// Force the current working directory as the project root
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current directory: %w", err)
+	}
+
+	// Determine platform
 	var platform string
 	if platformFlag != "" {
 		platform = platformFlag
 		logger.Info("Using platform from flag", zap.String("platform", platform))
 	} else {
-		// Try auto-detection
 		detected, err := container.PlatformDetector.Detect(cwd)
 		if err != nil {
 			logger.Warn("Could not auto-detect platform", zap.Error(err))
@@ -52,7 +58,6 @@ func initProject(cmd *cobra.Command, container *di.Container) error {
 		}
 	}
 
-	// validate platform
 	allowed := map[string]bool{
 		"android": true, "flutter": true, "react-native": true,
 		"ios": true, "kotlin": true, "compose": true, "unity": true, "unknown": true,
@@ -62,21 +67,23 @@ func initProject(cmd *cobra.Command, container *di.Container) error {
 	}
 	logger.Info("Using platform", zap.String("platform", platform))
 
-	// 2. Create .revora directory
+	// Create .revora directory inside current directory
 	revoraDir := filepath.Join(cwd, ".revora")
 	if err := os.MkdirAll(revoraDir, 0755); err != nil {
 		return fmt.Errorf("create .revora: %w", err)
 	}
 
-	// 3. Generate signing keys
+	// Generate signing keys
 	if container.KeyManager != nil {
+		// Recreate key manager for the correct directory
+		container.KeyManager = crypto.NewKeyManager(cwd) // force keys into current dir
 		if err := container.KeyManager.Generate(); err != nil {
 			return fmt.Errorf("generate keys: %w", err)
 		}
 		logger.Info("Signing keys generated")
 	}
 
-	// 4. Write revora.yaml
+	// Write revora.yaml in current directory
 	configFile := filepath.Join(cwd, "revora.yaml")
 	publicKeyPath := filepath.Join(revoraDir, "keys", "public.pem")
 	content := fmt.Sprintf("platform: %s\nsigning_key: %s\n", platform, publicKeyPath)
@@ -85,7 +92,7 @@ func initProject(cmd *cobra.Command, container *di.Container) error {
 	}
 	logger.Info("revora.yaml created")
 
-	// 5. Create GitHub Actions workflow
+	// Create GitHub Actions workflow
 	workflowDir := filepath.Join(cwd, ".github", "workflows")
 	if err := os.MkdirAll(workflowDir, 0755); err != nil {
 		return fmt.Errorf("create workflows dir: %w", err)

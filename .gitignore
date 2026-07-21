@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+revora-patch
+revora
+
+# Test & build
+*.test
+*.out
+build/
+dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Go
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Flutter plugin generated
+.dart_tool/
+.packages
+*.lock
+
+# Revora artifacts
+*.patch
+manifest.json
+manifest.json.sig
+
+# But keep source and essential config
+!.github/
+!.revora/keys/
+!revora.yaml
