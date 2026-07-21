@@ -39,7 +39,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 	logger := container.Logger
 	cfg := container.Config
 
-	// 1. Determine old and new build directories
+	// 1. Locate old and new build directories
 	oldDir := filepath.Join(cfg.ProjectDir, ".revora", "cache", "previous")
 	newDir := filepath.Join(cfg.ProjectDir, "build")
 
@@ -47,26 +47,9 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		zap.String("old", oldDir),
 		zap.String("new", newDir),
 	)
-
-	// If the previous build cache doesn't exist, create it from the current build
-	// This happens on the very first patch (no baseline)
 	if _, err := os.Stat(oldDir); os.IsNotExist(err) {
-		logger.Warn("No previous build found. This appears to be your first patch.")
-		fmt.Println("⚠️  First patch detected. Using current build as baseline (this patch may be large).")
-		if err := os.MkdirAll(oldDir, 0755); err != nil {
-			return fmt.Errorf("create previous cache dir: %w", err)
-		}
-		// Copy current build to previous
-		if err := copyDir(newDir, oldDir); err != nil {
-			return fmt.Errorf("copy current build to previous: %w", err)
-		}
-		fmt.Println("✅ Baseline created. Future patches will be small and fast.")
-		// Since we just made old identical to new, there's nothing to patch.
-		// We'll exit gracefully and let the user know.
-		fmt.Println("No changes to patch (baseline established). Run 'revora patch' again after making code changes.")
-		return nil
+		return fmt.Errorf("previous build not found at %s – run 'revora build' and then make a release first", oldDir)
 	}
-
 	if _, err := os.Stat(newDir); os.IsNotExist(err) {
 		return fmt.Errorf("current build not found at %s – run 'revora build' first", newDir)
 	}
@@ -131,7 +114,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		return err
 	}
 
-	// 8. Upload to GitHub (if a client is available)
+	// 8. Upload to GitHub
 	if container.GitHubClient == nil {
 		return fmt.Errorf("GitHub client not available – run revora login")
 	}
@@ -140,6 +123,7 @@ func createPatch(ctx context.Context, container *di.Container) error {
 		return err
 	}
 
+	// Create a draft release
 	logger.Info("Creating draft release on GitHub...")
 	release, err := container.GitHubClient.CreateRelease(ctx, owner, repo, &github.RepositoryRelease{
 		TagName:    github.String(nextVersion),
@@ -239,26 +223,4 @@ func getNextVersion(projectDir string) string {
 	}
 	parts[2] = strconv.Itoa(patch + 1)
 	return strings.Join(parts, ".")
-}
-
-// copyDir recursively copies a directory tree from src to dst.
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, info.Mode())
-	})
 }

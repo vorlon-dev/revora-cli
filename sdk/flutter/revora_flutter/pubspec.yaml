@@ -1,6 +1,6 @@
 ﻿name: revora_flutter
 description: Flutter plugin for Revora OTA updates.
-version: 0.0.1
+version: 0.0.77
 homepage: https://revora.dev
 
 environment:
